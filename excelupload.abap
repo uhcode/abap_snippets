@@ -1,130 +1,97 @@
+*----------------------------------------------------------------------*
+* Snippet: Upload an Excel file from the frontend (SAP GUI)
+*----------------------------------------------------------------------*
+* Purpose : Lets the user pick an Excel file, reads it into an
+*           internal table and lists all e-mail addresses that occur
+*           more than once.
+*
+* Expected layout: header in row 1, data from row 2, columns
+*   A = SMTP address, B = name, C = data 1, D = data 2
+*
+* ALSM_EXCEL_TO_INTERNAL_TABLE uses OLE, so it only works in dialog
+* with SAP GUI for Windows and an installed Excel.
+*----------------------------------------------------------------------*
 TYPES: BEGIN OF ts_excel,
-        smtp       TYPE  string,
-        name       TYPE  string,
-        data1      TYPE  string,
-        data2      TYPE  string,
+         smtp  TYPE string,
+         name  TYPE string,
+         data1 TYPE string,
+         data2 TYPE string,
        END OF ts_excel.
 
-DATA:  lt_file_tab      TYPE      filetable,
-       gd_subrc         TYPE      i.
-DATA   lv_file          TYPE                    string.
-DATA   lv_filepath      TYPE                    localfile.
-DATA   lt_xls           TYPE STANDARD TABLE OF  alsmex_tabline.
-DATA   ls_xls           TYPE                    alsmex_tabline.
-DATA   ls_excel         TYPE                    ts_excel.
-DATA   lt_excel         TYPE STANDARD TABLE OF  ts_excel.
-DATA   lv_dummy         TYPE                    string.
-DATA   lv_count         TYPE                    i.
-DATA   lt_list          TYPE                    string_table.
+DATA lt_files      TYPE filetable.
+DATA lv_rc         TYPE i.
+DATA lv_action     TYPE i.
+DATA lt_cells      TYPE STANDARD TABLE OF alsmex_tabline.
+DATA ls_excel      TYPE ts_excel.
+DATA lt_excel      TYPE STANDARD TABLE OF ts_excel.
+DATA lt_duplicates TYPE string_table.
 
-FIELD-SYMBOLS: <fs_comp>            TYPE   any,
-               <fs_excel>           TYPE   ts_excel.
-
-CLEAR: lt_file_tab, lt_xls, lv_count.
-
-CALL METHOD cl_gui_frontend_services=>file_open_dialog
+*----------------------------------------------------------------------*
+* File selection
+*----------------------------------------------------------------------*
+cl_gui_frontend_services=>file_open_dialog(
   EXPORTING
     window_title     = 'Select File'
     default_filename = '*.xls'
-*   multiselection   = 'X'
   CHANGING
-    file_table       = lt_file_tab
-    rc               = gd_subrc.
-
-READ TABLE lt_file_tab INTO lv_filepath INDEX 1.
-IF sy-subrc EQ 0.
-  CALL FUNCTION 'ALSM_EXCEL_TO_INTERNAL_TABLE'
-    EXPORTING
-      filename                = lv_filepath
-      i_begin_col             = 1
-      i_begin_row             = 2
-      i_end_col               = 4
-      i_end_row               = 65535
-    TABLES
-      intern                  = lt_xls
-    EXCEPTIONS
-      inconsistent_parameters = 1
-      upload_ole              = 2
-      OTHERS                  = 3.
-  IF sy-subrc <> 0.
-    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
-               WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
-  ENDIF.
-*----- Tabelle gemäß Excel-Datei aufbauen
-  LOOP AT lt_xls INTO ls_xls.
-    ASSIGN COMPONENT ls_xls-col OF STRUCTURE ls_excel TO <fs_comp>.
-    <fs_comp> = ls_xls-value.
-    AT END OF row.
-
-      READ TABLE lt_excel ASSIGNING <fs_excel> WITH KEY smtp = ls_excel-smtp.
-      IF sy-subrc EQ 0.
-        APPEND <fs_excel>-smtp TO lt_list.
-        lv_count = lv_count + 1.
-      ENDIF.
-      APPEND ls_excel TO lt_excel.
-      CLEAR ls_excel.
-    ENDAT.
-  ENDLOOP.
-
-**  SORT lt_excel BY smtp.
-**  LOOP AT lt_excel ASSIGNING <fs_excel>.
-**READ TABLE lt_excel TRANSPORTING NO FIELDS with key smtp
-**
-**
-**
-**  ENDLOOP.
-
+    file_table       = lt_files
+    rc               = lv_rc
+    user_action      = lv_action
+  EXCEPTIONS
+    OTHERS           = 1 ).
+IF sy-subrc <> 0
+OR lv_action = cl_gui_frontend_services=>action_cancel
+OR lt_files IS INITIAL.
+  RETURN.
 ENDIF.
 
-LOOP AT lt_list INTO lv_dummy.
+*----------------------------------------------------------------------*
+* Read the sheet - the result has one line per cell (row, col, value)
+*----------------------------------------------------------------------*
+CALL FUNCTION 'ALSM_EXCEL_TO_INTERNAL_TABLE'
+  EXPORTING
+    filename                = CONV localfile( lt_files[ 1 ]-filename )
+    i_begin_col             = 1
+    i_begin_row             = 2      " skip the header row
+    i_end_col               = 4
+    i_end_row               = 65535
+  TABLES
+    intern                  = lt_cells
+  EXCEPTIONS
+    inconsistent_parameters = 1
+    upload_ole              = 2
+    OTHERS                  = 3.
+IF sy-subrc <> 0.
+  MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+          WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+  RETURN.
+ENDIF.
 
-  WRITE: lv_dummy.
-  NEW-LINE.
+*----------------------------------------------------------------------*
+* Convert the cell list into one structured line per Excel row
+*----------------------------------------------------------------------*
+LOOP AT lt_cells INTO DATA(ls_cell).
+
+  " The column number of the cell is the component index of the target
+  ASSIGN COMPONENT ls_cell-col OF STRUCTURE ls_excel TO FIELD-SYMBOL(<lv_comp>).
+  IF sy-subrc = 0.
+    <lv_comp> = ls_cell-value.
+  ENDIF.
+
+  AT END OF row.
+    " Address already read in an earlier row -> remember it as duplicate
+    IF line_exists( lt_excel[ smtp = ls_excel-smtp ] ).
+      APPEND ls_excel-smtp TO lt_duplicates.
+    ENDIF.
+    APPEND ls_excel TO lt_excel.
+    CLEAR ls_excel.
+  ENDAT.
+
 ENDLOOP.
 
-******----- Daten übernehmen
-*****        CLEAR: lv_records, ls_zb2c_osdispo.
-*****        LOOP AT lt_dispoexcel INTO ls_dispoexcel.
-*****          lv_index = sy-tabix + 1.
-*****          IF ls_dispoexcel-menge EQ '0' OR ls_dispoexcel-menge IS INITIAL.
-*****            IF 1 = 2. MESSAGE e045(zsst_b2c). ENDIF.
-*****            MESSAGE ID 'ZSST_B2C' TYPE 'E' NUMBER '045' WITH lv_index.
-*****            EXIT.
-*****          ENDIF.
-*****          READ TABLE gt_osdispo_out ASSIGNING <fs_osdispo_out> WITH KEY tnr = ls_dispoexcel-matnr.
-*****          IF sy-subrc EQ 0.
-*****            CONDENSE ls_dispoexcel-menge NO-GAPS.
-*****            <fs_osdispo_out>-nschdispo = ls_dispoexcel-menge.
-******------ Summe VK
-*****            IF <fs_osdispo_out>-vkpreis_int IS NOT INITIAL.
-*****              lv_sumvk = <fs_osdispo_out>-nschdispo * <fs_osdispo_out>-vkpreis_int.
-*****              SPLIT lv_sumvk AT '.' INTO lv_sumvk lv_dec.
-*****              CONCATENATE lv_sumvk ',' lv_dec INTO <fs_osdispo_out>-disposumvk.
-*****            ENDIF.
-*****            IF ls_dispoexcel-glc EQ 'X' OR ls_dispoexcel-glc EQ 'true' OR ls_dispoexcel-glc EQ 'TRUE'
-*****                                                                       OR ls_dispoexcel-glc EQ 'x'.
-*****              <fs_osdispo_out>-glc   = 'X'.
-*****              <fs_osdispo_out>-lifnr = gc_glc_lifnr.
-*****            ELSE.
-*****              CLEAR <fs_osdispo_out>-glc.
-*****              <fs_osdispo_out>-lifnr = <fs_osdispo_out>-lifnr_noglc.
-*****            ENDIF.
-*****            IF ls_dispoexcel-lifdat IS NOT INITIAL.
-*****              CALL FUNCTION 'CONVERT_DATE_TO_INTERNAL'
-*****                EXPORTING
-*****                  date_external            = ls_dispoexcel-lifdat
-*****                IMPORTING
-*****                  date_internal            = <fs_osdispo_out>-lieftermin
-*****                EXCEPTIONS
-*****                  date_external_is_invalid = 1
-*****                  OTHERS                   = 2.
-*****              IF sy-subrc <> 0.
-*****                <fs_osdispo_out>-lieftermin = '9999'.
-*****              ENDIF.
-*****            ENDIF.
-*****          ENDIF.
-*****        ENDLOOP.
-*****        lv_records_str = lv_index - 1.
-*****        MESSAGE ID 'ZSST_B2C' TYPE 'S' NUMBER '038' WITH lv_records_str.
-*****        rs_selfield-refresh = 'X'."refresh ALV
-*****      ENDIF.
+*----------------------------------------------------------------------*
+* Output of the duplicate addresses
+*----------------------------------------------------------------------*
+LOOP AT lt_duplicates INTO DATA(lv_duplicate).
+  WRITE / lv_duplicate.
+ENDLOOP.

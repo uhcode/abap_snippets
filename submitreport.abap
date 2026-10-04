@@ -1,76 +1,71 @@
-  TYPES: BEGIN OF tys_endkennzeichen,
-           ebeln TYPE    ebeln,
-           ebelp TYPE    ebelp,
-           elikz TYPE    elikz,
-           eglkz TYPE    eglkz,
-         END OF tys_endkennzeichen.
+*----------------------------------------------------------------------*
+* Snippet: Call a report with a dynamically built selection table
+*----------------------------------------------------------------------*
+* Purpose : Checks for the given purchase order items whether the
+*           "delivery completed" (ELIKZ) or "final invoice" (EGLKZ)
+*           indicator is set and calls a report that resets them.
+*
+* Shows how to fill parameters and select-options of the called
+* report via SUBMIT ... WITH SELECTION-TABLE.
+*
+* Assumes the following objects from the surrounding method:
+*   it_positionen - items; BLNRA = purchase order, BPOSA = item
+*   p_test        - test run flag, passed on to the called report
+*----------------------------------------------------------------------*
+DATA lt_seltab      TYPE STANDARD TABLE OF rsparams WITH EMPTY KEY.
+DATA lt_ebelp_range TYPE ebelp_range_tty.
+DATA lv_ebeln       TYPE ebeln.
+DATA lv_reset_elikz TYPE abap_bool.
+DATA lv_reset_eglkz TYPE abap_bool.
 
+IF it_positionen IS INITIAL.
+  RETURN.
+ENDIF.
 
-  DATA: lt_seltab         TYPE STANDARD TABLE OF  rsparams,
-        l_bestellung_id   TYPE                    ebeln,
-        lt_endkennzeichen TYPE STANDARD TABLE OF  tys_endkennzeichen,
-        lrt_bestellpos    TYPE                    ebelp_range_tty.
+" All items belong to the same purchase order
+LOOP AT it_positionen ASSIGNING FIELD-SYMBOL(<ls_position>).
+  lv_ebeln = <ls_position>-blnra.
+  APPEND VALUE #( sign = 'I' option = 'EQ' low = <ls_position>-bposa ) TO lt_ebelp_range.
+ENDLOOP.
 
-  LOOP AT it_positionen ASSIGNING FIELD-SYMBOL(<ls_positionen>).
-    l_bestellung_id = <ls_positionen>-blnra.
-    APPEND INITIAL LINE TO lrt_bestellpos ASSIGNING FIELD-SYMBOL(<lrs_bestellpos>).
-    <lrs_bestellpos>-sign   = 'I'.
-    <lrs_bestellpos>-option = 'EQ'.
-    <lrs_bestellpos>-low    = <ls_positionen>-bposa.
-  ENDLOOP.
+SELECT ebelp, elikz, eglkz
+  FROM ekpo
+  WHERE ebeln =  @lv_ebeln
+    AND ebelp IN @lt_ebelp_range
+  INTO TABLE @DATA(lt_item_flags).
 
-  SELECT ebeln ebelp elikz eglkz FROM ekpo INTO CORRESPONDING FIELDS OF TABLE lt_endkennzeichen WHERE ebeln EQ l_bestellung_id
-                                                                                                  AND ebelp IN lrt_bestellpos.
-  LOOP AT lt_endkennzeichen ASSIGNING FIELD-SYMBOL(<ls_endkennzeichen>).
-    IF <ls_endkennzeichen>-elikz IS NOT INITIAL.
-      "P_ELIKZ
-      APPEND INITIAL LINE TO lt_seltab ASSIGNING FIELD-SYMBOL(<ls_seltab>).
-      <ls_seltab>-selname = 'P_ELIKZ'.
-      <ls_seltab>-sign    = 'I'.
-      <ls_seltab>-option  = 'EQ'.
-      <ls_seltab>-low     = space.
-      "P_ELI_UP
-      APPEND INITIAL LINE TO lt_seltab ASSIGNING <ls_seltab>.
-      <ls_seltab>-selname = 'P_ELI_UP'.
-      <ls_seltab>-sign    = 'I'.
-      <ls_seltab>-option  = 'EQ'.
-      <ls_seltab>-low     = abap_true.
-    ENDIF.
-    IF <ls_endkennzeichen>-eglkz IS NOT INITIAL.
-      "P_EALKZ
-      APPEND INITIAL LINE TO lt_seltab ASSIGNING <ls_seltab>.
-      <ls_seltab>-selname = 'P_EALKZ'.
-      <ls_seltab>-sign    = 'I'.
-      <ls_seltab>-option  = 'EQ'.
-      <ls_seltab>-low     = space.
-      "P_EAK_UP
-      APPEND INITIAL LINE TO lt_seltab ASSIGNING <ls_seltab>.
-      <ls_seltab>-selname = 'P_EAK_UP'.
-      <ls_seltab>-sign    = 'I'.
-      <ls_seltab>-option  = 'EQ'.
-      <ls_seltab>-low     = abap_true.
-    ENDIF.
-    IF <ls_endkennzeichen>-eglkz IS NOT INITIAL OR <ls_endkennzeichen>-elikz IS NOT INITIAL.
-      "S_EBELP-LOW
-      APPEND INITIAL LINE TO lt_seltab ASSIGNING <ls_seltab>.
-      <ls_seltab>-selname = 'S_EBELP'.
-      <ls_seltab>-sign    = 'I'.
-      <ls_seltab>-option  = 'EQ'.
-      <ls_seltab>-low     = <ls_endkennzeichen>-ebelp.
-    ENDIF.
-  ENDLOOP.
-  IF lt_seltab IS NOT INITIAL.
-    APPEND INITIAL LINE TO lt_seltab ASSIGNING <ls_seltab>.
-    <ls_seltab>-selname = 'S_EBELN'.
-    <ls_seltab>-sign    = 'I'.
-    <ls_seltab>-option  = 'EQ'.
-    <ls_seltab>-low     = l_bestellung_id.
+" Only items with at least one indicator set are passed to the report
+LOOP AT lt_item_flags ASSIGNING FIELD-SYMBOL(<ls_item_flags>)
+     WHERE elikz IS NOT INITIAL OR eglkz IS NOT INITIAL.
 
-    APPEND INITIAL LINE TO lt_seltab ASSIGNING <ls_seltab>.
-    <ls_seltab>-selname = 'P_TEST'.
-    <ls_seltab>-sign    = 'I'.
-    <ls_seltab>-option  = 'EQ'.
-    <ls_seltab>-low     = p_test.
-
-    SUBMIT z_some_report WITH SELECTION-TABLE lt_seltab AND RETURN.
+  IF <ls_item_flags>-elikz IS NOT INITIAL.
+    lv_reset_elikz = abap_true.
   ENDIF.
+  IF <ls_item_flags>-eglkz IS NOT INITIAL.
+    lv_reset_eglkz = abap_true.
+  ENDIF.
+
+  " Select-option (KIND = 'S'): one line per value
+  APPEND VALUE #( selname = 'S_EBELP' kind = 'S' sign = 'I' option = 'EQ'
+                  low     = <ls_item_flags>-ebelp ) TO lt_seltab.
+ENDLOOP.
+
+IF lt_seltab IS INITIAL.
+  RETURN.
+ENDIF.
+
+" Parameters (KIND = 'P'): new indicator value and "update" flag
+IF lv_reset_elikz = abap_true.
+  APPEND VALUE #( selname = 'P_ELIKZ'  kind = 'P' sign = 'I' option = 'EQ' low = space )     TO lt_seltab.
+  APPEND VALUE #( selname = 'P_ELI_UP' kind = 'P' sign = 'I' option = 'EQ' low = abap_true ) TO lt_seltab.
+ENDIF.
+IF lv_reset_eglkz = abap_true.
+  APPEND VALUE #( selname = 'P_EALKZ'  kind = 'P' sign = 'I' option = 'EQ' low = space )     TO lt_seltab.
+  APPEND VALUE #( selname = 'P_EAK_UP' kind = 'P' sign = 'I' option = 'EQ' low = abap_true ) TO lt_seltab.
+ENDIF.
+
+APPEND VALUE #( selname = 'S_EBELN' kind = 'S' sign = 'I' option = 'EQ' low = lv_ebeln ) TO lt_seltab.
+APPEND VALUE #( selname = 'P_TEST'  kind = 'P' sign = 'I' option = 'EQ' low = p_test )   TO lt_seltab.
+
+" AND RETURN: continue here after the called report has finished
+SUBMIT z_some_report WITH SELECTION-TABLE lt_seltab AND RETURN.
